@@ -101,6 +101,63 @@ apidocs-gen: ## Download crdoc locally if necessary.
 
 ##@ Development
 
+# Setup development env
+# if you never run it before, execute first
+# - make install
+# - make deploy
+# Prepare a simple OpenSSL config file
+# Do remember to export LAPTOP_HOST_IP before running this command
+define TLS_CNF
+[ req ]
+default_bits       = 4096
+distinguished_name = req_distinguished_name
+req_extensions     = req_ext
+[ req_distinguished_name ]
+countryName                = SG
+stateOrProvinceName        = SG
+localityName               = SG
+organizationName           = KAMAJI
+commonName                 = KAMAJI
+[ req_ext ]
+subjectAltName = @alt_names
+[alt_names]
+IP.1   = $(LAPTOP_HOST_IP)
+endef
+export TLS_CNF
+
+# Usage:
+# 	LAPTOP_HOST_IP=<YOUR_LAPTOP_IP> make dev-setup
+# For example:
+#	LAPTOP_HOST_IP=192.168.10.101 make dev-setup
+dev-setup:
+	kubectl -n kamaji-system scale deployment kamaji --replicas=0
+	mkdir -p /tmp/k8s-webhook-server/serving-certs
+	echo "$${TLS_CNF}" > _tls.cnf
+	openssl req -newkey rsa:4096 -days 3650 -nodes -x509 \
+		-subj "/C=SG/ST=SG/L=SG/O=KAMAJI/CN=KAMAJI" \
+		-extensions req_ext \
+		-config _tls.cnf \
+		-keyout /tmp/k8s-webhook-server/serving-certs/tls.key \
+		-out /tmp/k8s-webhook-server/serving-certs/tls.crt
+	rm _tls.cnf
+	export WEBHOOK_URL="https://$${LAPTOP_HOST_IP}:9443"; \
+	export CA_BUNDLE=`openssl base64 -in /tmp/k8s-webhook-server/serving-certs/tls.crt | tr -d '\n'`; \
+	kubectl patch MutatingWebhookConfiguration kamaji-mutating-webhook-configuration \
+		--type='json' -p="[\
+			{'op': 'replace', 'path': '/webhooks/1/clientConfig', 'value':{'url':\"$${WEBHOOK_URL}/mutate-kamaji-clastix-io-v1alpha1-tenantcontrolplane\", 'caBundle': \"$${CA_BUNDLE}\"}},\
+			{'op': 'replace', 'path': '/metadata/annotations/cert-manager.io~1inject-ca-from', 'value':\"\"}\
+		]" && \
+	kubectl patch ValidatingWebhookConfiguration kamaji-validating-webhook-configuration \
+		--type='json' -p="[\
+			{'op': 'replace', 'path': '/webhooks/2/clientConfig', 'value':{'url':\"$${WEBHOOK_URL}/validate-kamaji-clastix-io-v1alpha1-tenantcontrolplane\", 'caBundle': \"$${CA_BUNDLE}\"}},\
+			{'op': 'replace', 'path': '/metadata/annotations/cert-manager.io~1inject-ca-from', 'value':\"\"}\
+		]" && \
+	kubectl patch crd tenantcontrolplanes.kamaji.clastix.io \
+		--type='json' -p="[\
+			{'op': 'replace', 'path': '/spec/conversion/webhook/clientConfig', 'value':{'url': \"$${WEBHOOK_URL}\", 'caBundle': \"$${CA_BUNDLE}\"}},\
+			{'op': 'replace', 'path': '/metadata/annotations/cert-manager.io~1inject-ca-from', 'value':\"\"}\
+		]";
+
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
